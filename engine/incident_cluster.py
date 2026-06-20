@@ -1,0 +1,72 @@
+"""Cluster related risk findings into actionable incidents."""
+
+from collections import defaultdict
+
+from data.models import Incident, Severity
+
+
+def cluster_incidents(findings, unified_identities):
+    """Group related findings into incidents by identity and root cause."""
+    # Phase 1: Group by identity
+    by_identity = defaultdict(list)
+    for finding in findings:
+        by_identity[finding.identity_id].append(finding)
+
+    # Phase 2: Group by category across identities (systemic issues)
+    by_category = defaultdict(list)
+    for finding in findings:
+        by_category[finding.category.value].append(finding)
+
+    incidents = []
+
+    # Create per-identity incidents for identities with multiple findings
+    identity_map = {i.id: i for i in unified_identities}
+    for identity_id, id_findings in by_identity.items():
+        if len(id_findings) >= 2:
+            identity = identity_map.get(identity_id)
+            name = identity.display_name if identity else identity_id[:8]
+            incidents.append(Incident(
+                title=f"Multiple risks for {name}",
+                root_cause="compound_risk",
+                affected_identities=[identity_id],
+                findings=id_findings,
+                severity=_max_severity(id_findings),
+                aggregate_score=sum(f.score for f in id_findings),
+            ))
+
+    # Create systemic incidents for widespread category issues
+    for category, cat_findings in by_category.items():
+        if len(cat_findings) >= 3:
+            affected = list(set(f.identity_id for f in cat_findings))
+            incidents.append(Incident(
+                title=f"Systemic: {_category_title(category)} ({len(cat_findings)} findings)",
+                root_cause=category,
+                affected_identities=affected,
+                findings=cat_findings,
+                severity=_max_severity(cat_findings),
+                aggregate_score=sum(f.score for f in cat_findings),
+            ))
+
+    # Sort by aggregate score descending
+    incidents.sort(key=lambda i: i.aggregate_score, reverse=True)
+    return incidents
+
+
+def _max_severity(findings):
+    severity_order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW]
+    for severity in severity_order:
+        if any(f.severity == severity for f in findings):
+            return severity
+    return Severity.LOW
+
+
+def _category_title(category):
+    titles = {
+        "OrphanedAccount": "Orphaned Accounts",
+        "DormantAdmin": "Dormant Admin Accounts",
+        "PrivilegeSpike": "Privilege Escalations",
+        "CrossPlatformMismatch": "Cross-Platform Mismatches",
+        "OffboardingFailure": "Offboarding Failures",
+        "ExcessivePermissions": "Excessive Permissions",
+    }
+    return titles.get(category, category)
